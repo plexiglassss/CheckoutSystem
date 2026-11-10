@@ -1,0 +1,89 @@
+name: MWGC 0.6.10 MinGW cross-build
+
+on:
+  push:
+    branches:
+      - temp-mwgc-0610-build
+    paths:
+      - ".github/workflows/mwgc0610-mingw.yml"
+
+permissions:
+  contents: read
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install cross compiler
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y mingw-w64 ninja-build cmake pkg-config
+
+      - name: Download and reconstruct source payload
+        shell: bash
+        run: |
+          set -euo pipefail
+          base="https://raw.githubusercontent.com/plexiglassss/openmw/temp-mwgc-0610-build"
+          parts=(
+            mwgc0610-core.part00
+            mwgc0610-core.part01_02
+            mwgc0610-core.part03_04
+            mwgc0610-core.part05_06
+            mwgc0610-core.part07_08
+            mwgc0610-core.part09_10
+          )
+          : > mwgc0610-core.b64
+          for p in "${parts[@]}"; do
+            curl -fL "$base/$p" -o "$p"
+            tr -d '\r\n' < "$p" >> mwgc0610-core.b64
+          done
+          base64 -d mwgc0610-core.b64 > mwgc0610-core.tar.xz
+          echo "052e46c799ca93165ec9b36ce2726ca9d907e43b77325e677cc7421476783f5c  mwgc0610-core.tar.xz" | sha256sum -c -
+          mkdir mwgc-src
+          tar -xJf mwgc0610-core.tar.xz -C mwgc-src
+          sed -i '/add_subdirectory(tst)/d' mwgc-src/CMakeLists.txt
+
+      - name: Bootstrap vcpkg
+        run: |
+          git clone --depth 1 https://github.com/microsoft/vcpkg.git
+          ./vcpkg/bootstrap-vcpkg.sh -disableMetrics
+
+      - name: Configure
+        shell: bash
+        run: |
+          set -euo pipefail
+          cmake -S mwgc-src -B build -G Ninja \
+            -DCMAKE_BUILD_TYPE=Release \
+            -DCMAKE_TOOLCHAIN_FILE="$GITHUB_WORKSPACE/vcpkg/scripts/buildsystems/vcpkg.cmake" \
+            -DVCPKG_TARGET_TRIPLET=x64-mingw-static \
+            -DVCPKG_HOST_TRIPLET=x64-linux
+
+      - name: Build
+        run: |
+          cmake --build build --config Release --target MWGroundcoverGenerator MWGroundcoverGeneratorCLI
+
+      - name: Verify binaries
+        shell: bash
+        run: |
+          set -euo pipefail
+          test -f build/MWGroundcoverGenerator.exe
+          test -f build/MWGroundcoverGeneratorCLI.exe
+          file build/MWGroundcoverGenerator.exe build/MWGroundcoverGeneratorCLI.exe
+          sha256sum build/MWGroundcoverGenerator.exe build/MWGroundcoverGeneratorCLI.exe
+
+      - name: Stage artifact
+        shell: bash
+        run: |
+          mkdir artifact
+          cp build/MWGroundcoverGenerator.exe artifact/
+          cp build/MWGroundcoverGeneratorCLI.exe artifact/
+          cp mwgc-src/vcpkg.json artifact/
+          cp mwgc-src/CMakeLists.txt artifact/
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: MWGroundcoverGenerator-0.6.10-Windows-x64-MinGW
+          path: artifact
+          if-no-files-found: error
