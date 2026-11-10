@@ -1,0 +1,78 @@
+name: MWGC 0.6.10 Windows build
+
+on:
+  push:
+    branches:
+      - temp-mwgc-0610-build
+    paths:
+      - ".github/workflows/mwgc0610-build.yml"
+
+permissions:
+  contents: read
+
+jobs:
+  build:
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Download and reconstruct source payload
+        shell: pwsh
+        run: |
+          $base = "https://raw.githubusercontent.com/plexiglassss/openmw/temp-mwgc-0610-build"
+          $parts = @(
+            "mwgc0610-core.part00",
+            "mwgc0610-core.part01_02",
+            "mwgc0610-core.part03_04",
+            "mwgc0610-core.part05_06",
+            "mwgc0610-core.part07_08",
+            "mwgc0610-core.part09_10"
+          )
+          $b64 = ""
+          foreach ($p in $parts) {
+            Invoke-WebRequest -Uri "$base/$p" -OutFile $p
+            $b64 += (Get-Content -Raw $p).Trim()
+          }
+          [IO.File]::WriteAllBytes("mwgc0610-core.tar.xz", [Convert]::FromBase64String($b64))
+          $hash = (Get-FileHash "mwgc0610-core.tar.xz" -Algorithm SHA256).Hash.ToLower()
+          if ($hash -ne "052e46c799ca93165ec9b36ce2726ca9d907e43b77325e677cc7421476783f5c") {
+            throw "Source SHA256 mismatch: $hash"
+          }
+          New-Item -ItemType Directory -Force mwgc-src | Out-Null
+          tar -xJf mwgc0610-core.tar.xz -C mwgc-src
+          (Get-Content -Raw mwgc-src/CMakeLists.txt).Replace("add_subdirectory(tst)", "") | Set-Content -NoNewline mwgc-src/CMakeLists.txt
+
+      - name: Configure
+        shell: pwsh
+        run: |
+          $toolchain = Join-Path $env:VCPKG_INSTALLATION_ROOT "scripts/buildsystems/vcpkg.cmake"
+          cmake -S mwgc-src -B build -G Ninja -DCMAKE_BUILD_TYPE=Release -DCMAKE_TOOLCHAIN_FILE="$toolchain" -DVCPKG_TARGET_TRIPLET=x64-windows-static
+
+      - name: Build
+        shell: pwsh
+        run: |
+          cmake --build build --config Release --target MWGroundcoverGenerator MWGroundcoverGeneratorCLI
+
+      - name: Verify binaries
+        shell: pwsh
+        run: |
+          if (!(Test-Path build/MWGroundcoverGenerator.exe)) { throw "GUI executable missing" }
+          if (!(Test-Path build/MWGroundcoverGeneratorCLI.exe)) { throw "CLI executable missing" }
+          Get-Item build/MWGroundcoverGenerator.exe, build/MWGroundcoverGeneratorCLI.exe | Format-List Name,Length
+          Get-FileHash build/MWGroundcoverGenerator.exe -Algorithm SHA256
+          Get-FileHash build/MWGroundcoverGeneratorCLI.exe -Algorithm SHA256
+
+      - name: Stage artifact
+        shell: pwsh
+        run: |
+          New-Item -ItemType Directory -Force artifact | Out-Null
+          Copy-Item build/MWGroundcoverGenerator.exe artifact/
+          Copy-Item build/MWGroundcoverGeneratorCLI.exe artifact/
+          Copy-Item mwgc-src/vcpkg.json artifact/
+          Copy-Item mwgc-src/CMakeLists.txt artifact/
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: MWGroundcoverGenerator-0.6.10-Windows-x64
+          path: artifact
+          if-no-files-found: error
